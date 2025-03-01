@@ -1,0 +1,292 @@
+stages:
+  - build
+  - check_results
+  - docs
+
+variables:
+    CI_DOCKER_REGISTRY: "ciregistry.espressif.cn:8443"
+    ESP_THREAD_BR_PATH: "$CI_PROJECT_DIR"
+    CI_TOOLS_PATH: "$CI_PROJECT_DIR/tools/ci"
+    ESP_ENV_IMAGE: "$CI_DOCKER_REGISTRY/esp-env-v5.4:1"
+
+before_script:
+  - mkdir -p ~/.ssh
+  - chmod 700 ~/.ssh
+  - echo -n "${GITLAB_KEY}" >~/.ssh/id_rsa_base64
+  - base64 --decode --ignore-garbage ~/.ssh/id_rsa_base64 >~/.ssh/id_rsa
+  - chmod 600 ~/.ssh/id_rsa
+  - echo -e "Host gitlab.espressif.cn\n\tStrictHostKeyChecking no\n" >>~/.ssh/config
+
+pre_commit:
+  stage: .pre
+  image: "$CI_DOCKER_REGISTRY/esp-idf-pre-commit:1"
+  script:
+    - echo "Merge request is from ${CI_COMMIT_REF_NAME} into main"
+    - git fetch origin main ${CI_COMMIT_REF_NAME}
+    - export from_sha=$(git merge-base HEAD origin/main)
+    - echo "Checking changes from ${from_sha} to ${CI_COMMIT_SHA}:"
+    - git log --oneline ${from_sha}..${CI_COMMIT_SHA}
+    - echo "Modified files:"
+    - git diff-tree --no-commit-id --name-only -r ${from_sha} ${CI_COMMIT_SHA}
+    - echo "Running pre-commit:"
+    - pre-commit run --from ${from_sha} --to ${CI_COMMIT_SHA}
+  except:
+    - main
+  tags:
+    - host_test
+
+.submodule_update: &submodule_update
+  - cd $ESP_THREAD_BR_PATH
+  - git submodule update --init --recursive
+
+.setup_idf: &setup_idf
+  - cd $CI_PROJECT_DIR
+  - git clone --recursive -b master ${IDF_GIT_REPO_URL}
+  - cd esp-idf
+  - git checkout --track origin/$CI_COMMIT_REF_NAME || git branch
+  - git submodule update --recursive --init
+  - git rev-parse HEAD
+  - ./install.sh
+  - . ./export.sh
+
+.build_basic_thread_border_router: &build_basic_thread_border_router
+  - cd $IDF_PATH/examples/openthread/ot_rcp
+  - idf.py set-target esp32h2
+  - git rev-parse HEAD
+  - idf.py build
+  - cd $ESP_THREAD_BR_PATH/examples/basic_thread_border_router
+  - rm -rf CMakeLists.txt
+  - cp ${CI_TOOLS_PATH}/basic_thread_border_router.cmake CMakeLists.txt
+  - idf.py build
+
+.build_local_components: &build_local_components
+  - cd $IDF_PATH/examples/openthread/ot_rcp
+  - idf.py set-target esp32h2
+  - git rev-parse HEAD
+  - idf.py build
+
+  - cd $ESP_THREAD_BR_PATH/examples/basic_thread_border_router
+  - rm -rf main/idf_component.yml
+  - cp ${CI_TOOLS_PATH}/idf_component_local.yml main/idf_component.yml
+  - rm -rf CMakeLists.txt
+  - cp ${CI_TOOLS_PATH}/basic_thread_border_router.cmake CMakeLists.txt
+  - idf.py build
+
+.build_idf_example_ot_br: &build_idf_example_ot_br
+  - cd $IDF_PATH/examples/openthread/ot_br/main
+  - rm -rf idf_component.yml
+  - cp ${CI_TOOLS_PATH}/idf_component_otbr.yml idf_component.yml
+  - cd ..
+  - rm -rf CMakeLists.txt
+  - cp ${CI_TOOLS_PATH}/ot_br.cmake CMakeLists.txt
+  - idf.py set-target esp32s3
+  - idf.py build
+  - idf.py set-target esp32c6
+  - idf.py build
+
+.build_idf_example_ot_br_autostart: &build_idf_example_ot_br_autostart
+  - cd $IDF_PATH/examples/openthread/ot_br/main
+  - rm -rf idf_component.yml
+  - cp ${CI_TOOLS_PATH}/idf_component_otbr.yml idf_component.yml
+  - cd ..
+  - rm -rf CMakeLists.txt
+  - cp ${CI_TOOLS_PATH}/ot_br.cmake CMakeLists.txt
+  - rm -rf sdkconfig.defaults
+  - cp ${CI_TOOLS_PATH}/sdkconfig.br.autostart sdkconfig.defaults
+  - idf.py set-target esp32s3
+  - idf.py build
+  - idf.py set-target esp32c6
+  - idf.py build
+
+.build_idf_example_ot_cli: &build_idf_example_ot_cli
+  - cd $IDF_PATH/examples/openthread/ot_cli/main
+  - rm -rf idf_component.yml
+  - cp ${CI_TOOLS_PATH}/idf_component_otcli.yml idf_component.yml
+  - cd ..
+  - rm -rf CMakeLists.txt
+  - cp ${CI_TOOLS_PATH}/ot_cli.cmake CMakeLists.txt
+  - idf.py set-target esp32c6
+  - idf.py build
+  - idf.py set-target esp32h2
+  - idf.py build
+
+build_examples:
+    stage: build
+    image: espressif/idf:latest
+    script:
+        - *submodule_update
+        - *build_basic_thread_border_router
+        - cd $ESP_THREAD_BR_PATH
+        - echo "build_examples_result=true" > build_examples_result.txt
+    artifacts:
+        when: always
+        paths:
+            - build_examples_result.txt
+        expire_in: 1 days
+    tags:
+        - build
+    # allow failure if esp_ot_cli_extension version updated but haven't publish to component registry yet
+    allow_failure: true
+
+build_examples_local_components:
+    stage: build
+    image: $ESP_ENV_IMAGE
+    script:
+        - *submodule_update
+        - *setup_idf
+        - *build_local_components
+    tags:
+        - build
+
+build_idf_otbr_examples:
+    stage: build
+    image: $ESP_ENV_IMAGE
+    allow_failure: true
+    script:
+        - *setup_idf
+        - *build_idf_example_ot_br
+        - cd $ESP_THREAD_BR_PATH
+        - echo "build_idf_otbr_example_result=true" > build_idf_otbr_example_result.txt
+    artifacts:
+        when: always
+        paths:
+            - build_idf_otbr_example_result.txt
+        expire_in: 1 days
+    tags:
+        - build
+
+build_idf_otbr_autostart_examples:
+    stage: build
+    image: $ESP_ENV_IMAGE
+    allow_failure: true
+    script:
+        - *setup_idf
+        - *build_idf_example_ot_br_autostart
+        - cd $ESP_THREAD_BR_PATH
+        - echo "build_idf_otbr_autostart_example_result=true" > build_idf_otbr_autostart_example_result.txt
+    artifacts:
+        when: always
+        paths:
+            - build_idf_otbr_autostart_example_result.txt
+        expire_in: 1 days
+    tags:
+        - build
+
+build_idf_otcli_examples:
+    stage: build
+    image: $ESP_ENV_IMAGE
+    allow_failure: true
+    script:
+        - *setup_idf
+        - *build_idf_example_ot_cli
+        - cd $ESP_THREAD_BR_PATH
+        - echo "build_idf_otcli_example_result=true" > build_idf_otcli_example_result.txt
+    artifacts:
+        when: always
+        paths:
+            - build_idf_otcli_example_result.txt
+        expire_in: 1 days
+    tags:
+        - build
+
+build_docs:
+    stage: build
+    image: $CI_DOCKER_REGISTRY/esp-idf-doc-env-v5.1:1-1
+    variables:
+        ESP_DOCS_LATEST_BRANCH_NAME: "main"
+    artifacts:
+        when: always
+        paths:
+            - docs/_build/*/*/*.txt
+            - docs/_build/*/*/html/*
+        expire_in: 1 days
+    script:
+        - cd docs
+        - pip install -r requirements.txt
+        - build-docs -l en
+    tags:
+        - build_docs
+
+check_build_result:
+    stage: check_results
+    image: $ESP_ENV_IMAGE
+    needs:
+        - build_examples
+        - build_idf_otbr_examples
+        - build_idf_otbr_autostart_examples
+        - build_idf_otcli_examples
+    script:
+        - *submodule_update
+        - chmod 700 ./check_components_version.sh
+        - ALLOW_EXT_CMD_FAILURE_OUTPUT=$(./check_components_version.sh "components/esp_ot_cli_extension")
+        - ALLOW_EXT_CMD_FAILURE_VALUE=$(echo "$ALLOW_EXT_CMD_FAILURE_OUTPUT" | cut -d'=' -f2)
+        - echo "ALLOW_EXT_CMD_FAILURE_VALUE=$ALLOW_EXT_CMD_FAILURE_VALUE"
+        - ALLOW_RCP_UPDATE_FAILURE_OUTPUT=$(./check_components_version.sh "components/esp_rcp_update")
+        - ALLOW_RCP_UPDATE_FAILURE_VALUE=$(echo "$ALLOW_RCP_UPDATE_FAILURE_OUTPUT" | cut -d'=' -f2)
+        - echo "ALLOW_RCP_UPDATE_FAILURE_VALUE=$ALLOW_RCP_UPDATE_FAILURE_VALUE"
+        - |
+          if [ "$ALLOW_EXT_CMD_FAILURE_VALUE" == "true" ] || [ "$ALLOW_RCP_UPDATE_FAILURE_VALUE" == "true" ]; then
+            echo "allow failure"
+            exit 0;
+          else
+            if [ -f "build_examples_result.txt" ] &&
+               [ -f "build_idf_otbr_example_result.txt" ] &&
+               [ -f "build_idf_otbr_autostart_example_result.txt" ] &&
+               [ -f "build_idf_otcli_example_result.txt" ]; then
+               echo "Success!!!"
+               exit 0
+            else
+               echo "Fail!!!"
+               exit 1
+            fi
+          fi
+    tags:
+        - build
+
+.deploy_docs_template:
+    stage: docs
+    image: $CI_DOCKER_REGISTRY/esp-idf-doc-env-v5.1:1-1
+    needs:
+        - build_docs
+    variables:
+        ESP_DOCS_LATEST_BRANCH_NAME: "main"
+    script:
+        - source ${CI_PROJECT_DIR}/docs/utils.sh
+        - add_doc_server_ssh_keys $DOCS_DEPLOY_PRIVATEKEY $DOCS_DEPLOY_SERVER $DOCS_DEPLOY_SERVER_USER
+        - export GIT_VER=$(git describe --always)
+        - pip install -r ${CI_PROJECT_DIR}/docs/requirements.txt
+        - deploy-docs
+    tags:
+        - deploy
+
+deploy_docs_preview:
+    extends:
+        - .deploy_docs_template
+    except:
+        - main
+        - /^release\/v/
+        - /^v\d+\.\d+/
+    variables:
+        TYPE: "preview"
+        DOCS_BUILD_DIR: "${CI_PROJECT_DIR}/docs/_build/"
+        DOCS_DEPLOY_PATH: "$DOCS_PREVIEW_PATH"
+        DOCS_DEPLOY_PRIVATEKEY: "$DOCS_PREVIEW_DEPLOY_KEY"
+        DOCS_DEPLOY_SERVER: "$DOCS_PREVIEW_SERVER"
+        DOCS_DEPLOY_SERVER_USER: "$DOCS_PREVIEW_SERVER_USER"
+        DOCS_DEPLOY_URL_BASE: "https://$DOCS_PREVIEW_SERVER/projects/esp-thread-br"
+
+deploy_docs_production:
+    extends:
+        - .deploy_docs_template
+    only:
+        - main
+        - /^release\/v/
+        - /^v\d+\.\d+/
+    variables:
+        TYPE: "preview"
+        DOCS_BUILD_DIR: "${CI_PROJECT_DIR}/docs/_build/"
+        DOCS_DEPLOY_PATH: "$DOCS_PROD_PATH"
+        DOCS_DEPLOY_PRIVATEKEY: "$DOCS_PROD_DEPLOY_KEY"
+        DOCS_DEPLOY_SERVER: "$DOCS_PROD_SERVER"
+        DOCS_DEPLOY_SERVER_USER: "$DOCS_PROD_SERVER_USER"
+        DOCS_DEPLOY_URL_BASE: "https://docs.espressif.com/projects/esp-thread-br"
