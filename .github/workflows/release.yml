@@ -1,0 +1,31 @@
+name: build chip-tool
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  upload_components:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@master
+
+      - name: set node
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node }}
+          
+      - name: set python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12" 
+
+      - name: clone
+        run: |
+          git clone --recurse-submodules https://github.com/project-chip/connectedhomeip.git
+          cd connectedhomeip
+
+      - name: build
+        run: |
+          ./scripts/examples/gn_build_example.sh examples/chip-tool out/
